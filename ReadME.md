@@ -59,9 +59,10 @@ validators
 ### 2. 手动安装
 
 ```bash
-git clone https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd.git
+cd AstrBot/data/plugins
+https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd.git
 cd astrbot_plugin_Mirecraft_motd
-pip install -e .
+pip install -r requirements.txt
 ```
 
 ---
