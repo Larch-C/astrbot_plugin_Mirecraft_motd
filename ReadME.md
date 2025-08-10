@@ -34,7 +34,7 @@ cd astrbot_plugin_Mirecraft_motd
 pip install -e .
 ```
 
---
+---
 
 ## 📜 更新日志
 
