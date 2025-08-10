@@ -1,5 +1,5 @@
 name: astrbot_plugin_MinecraftMOTD
-desc: 获取 Minecraft 服务器 MOTD 状态的 AstrBot 插件
+desc: 基于Astrbot的motd探测服务器的插件
 version: v1.0.1
 author: ChuranNeko
 repo: https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd
