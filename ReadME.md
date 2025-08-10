@@ -34,13 +34,7 @@ cd astrbot_plugin_Mirecraft_motd
 pip install -e .
 ```
 
-## 🔄 平台兼容性
-
-本插件支持以下平台：
-
-## 🤝 贡献指南
-
-欢迎贡献代码、提交问题或改进建议！请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详情。
+--
 
 ## 📜 更新日志
 
