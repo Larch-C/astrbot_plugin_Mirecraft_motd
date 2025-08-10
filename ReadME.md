@@ -1,6 +1,5 @@
 # AstrBot Minecraft MOTD
 
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/ChuranNeko/astrbot_plugin_Mirecraft_motd/ci.yml?branch=main)
 ![Python Versions](https://img.shields.io/badge/python-3.8%20%7C%203.9%20%7C%203.10-blue)
 ![License](https://img.shields.io/github/license/ChuranNeko/astrbot_plugin_Mirecraft_motd)
 ![Version](https://img.shields.io/badge/version-1.0.1-green)
