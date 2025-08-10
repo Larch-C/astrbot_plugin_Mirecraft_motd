@@ -60,7 +60,7 @@ validators
 
 ```bash
 cd AstrBot/data/plugins
-https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd.git
+git clone https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd.git
 cd astrbot_plugin_Mirecraft_motd
 pip install -r requirements.txt
 ```
