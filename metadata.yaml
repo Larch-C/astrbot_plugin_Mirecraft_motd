@@ -1,5 +1,5 @@
-name: astrbot_plugin_Mirecraft_motd # 这是你的插件的唯一识别名。
-desc: 基于 AstrBot 的 Minecraft MOTD 插件 # 插件简短描述
-version: v1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Soulter # 作者
-repo: https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd # 插件的仓库地址
+name: astrbot_plugin_MinecraftMOTD
+desc: 获取 Minecraft 服务器 MOTD 状态的 AstrBot 插件
+version: v1.0.1
+author: ChuranNeko
+repo: https://github.com/ChuranNeko/astrbot_plugin_Mirecraft_motd
