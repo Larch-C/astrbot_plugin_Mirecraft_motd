@@ -18,11 +18,10 @@
 运行此插件需要以下依赖（已包含在 `requirements.txt` 中）：
 
 ```txt
-
-httpx
 validators
 mcstatus
 Pillow
+requests
 ```
 
 **字体文件**：插件包含 `font/Minecraft_AE.ttf` 字体文件，确保跨平台兼容性和 Minecraft 主题一致性。
