@@ -2,7 +2,8 @@
 
 ![Python Versions](https://img.shields.io/badge/python-3.8%20%7C%203.9%20%7C%203.10-blue)
 ![License](https://img.shields.io/github/license/ChuranNeko/astrbot_plugin_Mirecraft_motd)
-![Version](https://img.shields.io/badge/version-1.1.0-green)
+![Version](https://img.shields.io/badge/version-1.3.0-green)
+
 ## 🌟 功能简介
 
 本插件为 **AstrBot** 提供 `/motd` 命令，可在本地主动探测指定 **Minecraft Java** 或 **Bedrock** 服务器（无需外部 HTTP API），获取状态信息（MOTD、在线状态、玩家人数、服务器图标等），并在本地渲染状态图片发送到聊天中。
@@ -18,11 +19,15 @@
 运行此插件需要以下依赖（已包含在 `requirements.txt` 中）：
 
 ```txt
+
 validators
 mcstatus
 Pillow
 requests
+
 ```
+
+---
 
 **字体文件**：插件包含 `font/Minecraft_AE.ttf` 字体文件，确保跨平台兼容性和 Minecraft 主题一致性。
 
@@ -84,8 +89,6 @@ pip install -r requirements.txt
 * 延迟、协议、客户端/服务器版本
 * 当前在线人数、最大人数、玩家示例列表（若可用）
 * MOTD 文本
-
-
 
 ---
 

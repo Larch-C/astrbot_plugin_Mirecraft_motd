@@ -16,28 +16,48 @@ from mcstatus import JavaServer, BedrockServer
 from PIL import Image, ImageDraw, ImageFont
 
 
-@register("astrbot_minecraft_motd", "ChuranNeko", "Minecraft 服务器 MOTD 状态图", "1.1.0")
+@register("astrbot_minecraft_motd", "ChuranNeko", "Minecraft 服务器 MOTD 状态图", "1.3.0")
 class MinecraftMOTDPlugin(Star):
+    """
+    Minecraft 服务器 MOTD 插件
+    
+    支持并行探测 Java 版和基岩版服务器，生成美观的状态卡片。
+    支持 IPv4、IPv6、域名格式的服务器地址。
+    """
+    
     def __init__(self, context: Context):
         super().__init__(context)
 
     @filter.command("motd")
     async def handle_motd(self, event: AstrMessageEvent):
-        '''获取 Minecraft 服务器 MOTD 状态信息'''
+        """
+        处理 MOTD 命令，探测 Minecraft 服务器状态
+        
+        支持格式:
+        /motd <server_address>[:<port>]
+        
+        例如:
+        /motd play.example.com
+        /motd mc.hypixel.net:25565
+        /motd [2001:db8::1]:19132
+        """
         
         # 从消息内容中解析服务器地址
         message_str = event.message_str.strip()
-        logger.info(f"原始消息: '{message_str}'")
+        # 为了日志安全，只记录消息长度
+        logger.info(f"收到 MOTD 请求，消息长度: {len(message_str)}")
         
         if message_str == "motd":
             address = None
-        else:
-            # 提取 motd 后面的内容作为地址
-            address = message_str.replace("motd", "").strip()
+        elif message_str.startswith("motd "):
+            # 精确提取 motd 后面的内容作为地址
+            address = message_str[len("motd "):].strip()
             if not address:
                 address = None
+        else:
+            address = None
         
-        logger.info(f"解析后的地址: '{address}'")
+        logger.info(f"解析后的地址: {address[:50] if address and len(address) > 50 else address}")
 
         if not address:
             usage = (
@@ -70,57 +90,131 @@ class MinecraftMOTDPlugin(Star):
         ip = match.group(1)
         port = int(match.group(2)) if match.group(2) else None
 
-        # 对输入的ip做预检查
-        if (not validators.ip_address.ipv4(ip, cidr=False) and
-                not validators.ip_address.ipv6(ip, cidr=False) and
-                not validators.domain(ip, consider_tld=False)):
-            logger.info(f"预检查{ip}无效")
+        # 对输入的地址做预检查（更宽松的验证）
+        is_valid = False
+        
+        # 检查是否为有效的 IPv4 地址
+        try:
+            if validators.ip_address.ipv4(ip, cidr=False):
+                is_valid = True
+        except:
+            pass
+        
+        # 检查是否为有效的 IPv6 地址  
+        try:
+            if validators.ip_address.ipv6(ip, cidr=False):
+                is_valid = True
+        except:
+            pass
+        
+        # 检查是否为有效的域名（使用更宽松的验证）
+        try:
+            if validators.domain(ip):
+                is_valid = True
+        except:
+            pass
+        
+        # 如果都不是有效格式，进行额外的简单检查
+        if not is_valid:
+            # 简单的域名格式检查：包含点且不包含非法字符
+            if '.' in ip and not any(char in ip for char in [' ', '/', '\\', '?', '#']):
+                is_valid = True
+        
+        if not is_valid:
+            logger.info(f"预检查发现地址无效: {ip[:20]}")
             yield event.plain_result("服务器地址无效")
             return
 
-        # 探测逻辑
-        status_info = None
-        if port is None:
-            # 未指定端口：先探测 Java 默认 25565，再探测 Bedrock 默认 19132
-            status_info = await self._probe_java(ip, 25565)
-            if status_info is None:
-                status_info = await self._probe_bedrock(ip, 19132)
-        else:
-            # 指定端口：先以 Java(TCP) 探测，失败再以 Bedrock(UDP) 探测
-            status_info = await self._probe_java(ip, port)
-            if status_info is None:
-                status_info = await self._probe_bedrock(ip, port)
-
-        if status_info is None:
+        # 并行探测逻辑
+        status_infos = await self._parallel_probe(ip, port)
+        
+        if not status_infos:
             yield event.plain_result("当前服务器不在线，或者当前服务器信息输入错误，请检查服务器与端口后重试")
             return
 
-        # 渲染图片，保存临时文件并返回本地路径（兼容 AstrBot 期望本地文件路径的行为）
-        img_bytes, status_text = self._render_status_card(status_info)
-        file_path = self._save_temp_image(img_bytes)
+        # 处理探测结果
+        for status_info in status_infos:
+            # 渲染图片和文本
+            img_bytes, status_text = await self._render_status_card(status_info)
+            file_path = self._save_temp_image(img_bytes)
 
-        logger.info(f"发送 Minecraft MOTD 本地渲染图片: {file_path}")
+            logger.info(f"发送 Minecraft MOTD 本地渲染图片: {file_path}")
 
-        # 异步清理临时文件，延后删除以保证发送完成
-        try:
+            # 异步清理临时文件
             asyncio.create_task(self._cleanup_file(file_path))
-        except Exception:
-            pass
 
-        yield event.chain_result([Comp.Image(file_path)])
-        yield event.plain_result(status_text)
+            # 图片和文字一并发送
+            yield event.chain_result([Comp.Image(file_path), Comp.Plain(status_text)])
         return
 
     async def initialize(self):
         logger.info("MinecraftMOTDPlugin 已初始化")
 
+    async def _parallel_probe(self, host: str, port: Optional[int], timeout_sec: float = 5.0) -> List[dict]:
+        """
+        并行探测 Java 和 Bedrock 服务器，返回所有成功的结果
+        
+        Args:
+            host: 服务器地址
+            port: 端口号（可选）
+            timeout_sec: 超时时间
+            
+        Returns:
+            成功探测的服务器信息列表
+        """
+        tasks = []
+        
+        if port is None:
+            # 未指定端口：并行探测 Java(25565) 和 Bedrock(19132)
+            tasks.append(self._probe_java(host, 25565, timeout_sec))
+            tasks.append(self._probe_bedrock(host, 19132, timeout_sec))
+        else:
+            # 指定端口：并行探测 Java 和 Bedrock
+            tasks.append(self._probe_java(host, port, timeout_sec))
+            tasks.append(self._probe_bedrock(host, port, timeout_sec))
+        
+        # 并行执行所有任务
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 过滤成功的结果
+        valid_results = []
+        for result in results:
+            if isinstance(result, dict) and result is not None:
+                valid_results.append(result)
+        
+        return valid_results
+
     async def terminate(self):
         logger.info("MinecraftMOTDPlugin 已停止")
 
     async def _probe_java(self, host: str, port: int, timeout_sec: float = 5.0) -> Optional[dict]:
+        """
+        探测 Java 版服务器
+        
+        Args:
+            host: 服务器地址
+            port: 端口号
+            timeout_sec: 超时时间
+            
+        Returns:
+            服务器信息或 None
+        """
         try:
+            logger.info(f"开始 Java 探测: {host}:{port}")
+            
+            # 创建服务器对象
             server = JavaServer.lookup(f"{host}:{port}")
-            status = await asyncio.wait_for(server.async_status(), timeout=timeout_sec)
+            logger.info(f"JavaServer.lookup 成功: {host}:{port}")
+            
+            # 获取服务器状态（先尝试异步，失败后尝试同步）
+            try:
+                status = await asyncio.wait_for(server.async_status(), timeout=timeout_sec)
+                logger.info(f"Java 异步探测成功: {host}:{port}")
+            except Exception as async_error:
+                logger.info(f"Java 异步探测失败，尝试同步: {async_error}")
+                # 备选方案：使用同步方法
+                status = await asyncio.get_event_loop().run_in_executor(None, server.status)
+                logger.info(f"Java 同步探测成功: {host}:{port}")
             # 解析 Java 返回
             version_name = getattr(status.version, "name", "")
             protocol = getattr(status.version, "protocol", None)
@@ -162,20 +256,109 @@ class MinecraftMOTDPlugin(Star):
                 "motd": motd_text or "",
                 "favicon_data_uri": favicon_data_uri,
             }
+        except asyncio.TimeoutError:
+            logger.warning(f"Java 探测超时: {host}:{port} (超时 {timeout_sec}s)")
+            return None
+        except ConnectionError as e:
+            logger.warning(f"Java 连接错误: {host}:{port} - {e}")
+            return None
         except Exception as e:
-            logger.info(f"Java 探测失败 {host}:{port} - {e}")
+            logger.warning(f"Java 探测失败: {host}:{port} - {type(e).__name__}: {e}")
             return None
 
     async def _probe_bedrock(self, host: str, port: int, timeout_sec: float = 5.0) -> Optional[dict]:
+        """
+        探测 Bedrock 版服务器
+        
+        Args:
+            host: 服务器地址
+            port: 端口号
+            timeout_sec: 超时时间
+            
+        Returns:
+            服务器信息或 None
+        """
         try:
+            logger.info(f"开始 Bedrock 探测: {host}:{port}")
+            
+            # 创建服务器对象
             server = BedrockServer.lookup(f"{host}:{port}")
-            status = await asyncio.wait_for(server.async_status(), timeout=timeout_sec)
+            logger.info(f"BedrockServer.lookup 成功: {host}:{port}")
+            
+            # 获取服务器状态（先尝试异步，失败后尝试同步）
+            try:
+                status = await asyncio.wait_for(server.async_status(), timeout=timeout_sec)
+                logger.info(f"Bedrock 异步探测成功: {host}:{port}")
+            except Exception as async_error:
+                logger.info(f"Bedrock 异步探测失败，尝试同步: {async_error}")
+                # 备选方案：使用同步方法
+                status = await asyncio.get_event_loop().run_in_executor(None, server.status)
+                logger.info(f"Bedrock 同步探测成功: {host}:{port}")
 
-            # Bedrock 字段兼容
-            version_name = getattr(status, "version", None) or getattr(status, "version_brand", "")
-            players_online = getattr(status, "players_online", 0)
-            players_max = getattr(status, "players_max", 0)
-            motd_text = getattr(status, "motd", "")
+            # Bedrock 字段兼容（根据 mcstatus 命令行输出修正）
+            # 添加调试日志来查看状态对象的实际字段
+            logger.info(f"Bedrock 状态对象字段: {[attr for attr in dir(status) if not attr.startswith('_')]}")
+            
+            version_raw = getattr(status, "version", None)
+            if version_raw:
+                # 如果 version 是对象，尝试获取 name 属性
+                if hasattr(version_raw, 'name'):
+                    version_name = getattr(version_raw, 'name', '')
+                else:
+                    version_name = str(version_raw)
+            else:
+                # 备选方案
+                version_name = getattr(status, "version_brand", "")
+            
+            # 直接解析 players 字符串（首选方式）
+            players_online = 0
+            players_max = 0
+
+            if hasattr(status, 'players'):
+                # 转为字符串形式，兼容原始格式
+                players_str = str(getattr(status, 'players', ''))
+                logger.info(f"Bedrock players 原始值: '{players_str}'")
+
+                # 使用正则表达式解析 BedrockStatusPlayers(online=5, max=33) 格式
+                match = re.search(r'online=(\d+).*?max=(\d+)', players_str)
+                if match:
+                    try:
+                        players_online = int(match.group(1))
+                        players_max = int(match.group(2))
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Bedrock 玩家数量解析失败: {e}")
+
+            logger.info(f"Bedrock 玩家数量解析结果: online={players_online}, max={players_max}")
+            
+            # 处理 Bedrock MOTD（尝试多个可能的字段）
+            motd_text = ""
+            
+            # 首先尝试 motd 字段
+            motd_raw = getattr(status, "motd", None)
+            if motd_raw:
+                if hasattr(motd_raw, 'clean'):
+                    motd_text = getattr(motd_raw, 'clean', str(motd_raw))
+                elif hasattr(motd_raw, 'raw'):
+                    motd_text = getattr(motd_raw, 'raw', str(motd_raw))
+                else:
+                    motd_text = str(motd_raw)
+            
+            # 如果 motd 字段为空，尝试其他可能的字段
+            if not motd_text:
+                # 尝试 description 字段
+                desc = getattr(status, "description", None)
+                if desc:
+                    if hasattr(desc, 'clean'):
+                        motd_text = getattr(desc, 'clean', str(desc))
+                    else:
+                        motd_text = str(desc)
+            
+            # 如果还是为空，尝试 map_name 或其他字段
+            if not motd_text:
+                motd_text = getattr(status, "map_name", "") or getattr(status, "level_name", "")
+            
+            # 记录 MOTD 获取结果
+            logger.info(f"Bedrock MOTD 解析: '{motd_text}'")
 
             return {
                 "edition": "BE基岩版",
@@ -191,11 +374,44 @@ class MinecraftMOTDPlugin(Star):
                 "motd": motd_text or "",
                 "favicon_data_uri": None,
             }
+        except asyncio.TimeoutError:
+            logger.warning(f"Bedrock 探测超时: {host}:{port} (超时 {timeout_sec}s)")
+            return None
+        except ConnectionError as e:
+            logger.warning(f"Bedrock 连接错误: {host}:{port} - {e}")
+            return None
         except Exception as e:
-            logger.info(f"Bedrock 探测失败 {host}:{port} - {e}")
+            logger.warning(f"Bedrock 探测失败: {host}:{port} - {type(e).__name__}: {e}")
             return None
 
-    def _render_status_card(self, info: dict) -> Tuple[bytes, str]:
+    def _load_font(self, size: int) -> ImageFont.ImageFont:
+        """
+        加载 Minecraft 字体
+        
+        Args:
+            size: 字体大小
+            
+        Returns:
+            字体对象
+        """
+        # 优先使用插件自带的 Minecraft 字体
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        minecraft_font = os.path.join(plugin_dir, "font", "Minecraft_AE.ttf")
+        
+        try:
+            if os.path.exists(minecraft_font):
+                return ImageFont.truetype(minecraft_font, size)
+        except Exception as e:
+            logger.info(f"加载 Minecraft 字体失败: {e}")
+        
+        # 备选方案：使用默认字体
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return ImageFont.load_default()
+
+    async def _render_status_card(self, info: dict) -> Tuple[bytes, str]:
+        """渲染服务器状态卡片"""
         # 准备画布
         width, height = 900, 300
         bg_color = (28, 30, 34)
@@ -207,52 +423,65 @@ class MinecraftMOTDPlugin(Star):
         draw = ImageDraw.Draw(image)
 
         # 字体
-        def load_font(size: int):
-            # 优先使用插件自带的 Minecraft 字体
-            plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            minecraft_font = os.path.join(plugin_dir, "font", "Minecraft_AE.ttf")
-            
-            try:
-                if os.path.exists(minecraft_font):
-                    return ImageFont.truetype(minecraft_font, size)
-            except Exception as e:
-                logger.info(f"加载 Minecraft 字体失败: {e}")
-            
-            # 备选方案：尝试加载系统中文字体
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",  # 微软雅黑
-                "C:/Windows/Fonts/simsun.ttc",  # 宋体
-                "C:/Windows/Fonts/arial.ttf",  # Arial
-                "/System/Library/Fonts/PingFang.ttc",  # macOS 苹方
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
-            ]
-            
-            for font_path in font_paths:
-                try:
-                    if os.path.exists(font_path):
-                        return ImageFont.truetype(font_path, size)
-                except Exception:
-                    continue
-            
-            # 最后的备选方案：使用默认字体
-            try:
-                return ImageFont.load_default()
-            except Exception:
-                return ImageFont.load_default()
-
-        font_title = load_font(28)
-        font_body = load_font(20)
-        font_small = load_font(16)
+        font_title = self._load_font(28)
+        font_body = self._load_font(20)
+        font_small = self._load_font(16)
 
         padding = 20
         x = padding
         y = padding
 
         # 服务器图标处理
-        icon_loaded = False
+        icon_loaded = self._load_server_icon(image, info, x, y)
+        x_text = x + 96 + 16 if icon_loaded else x
+
+        # 渲染内容
+        self._render_content(draw, info, x_text, y, font_title, font_body, font_small, 
+                           fg_primary, fg_secondary, accent, width, padding)
+
+        # 导出字节
+        buf = BytesIO()
+        image.save(buf, format="PNG", optimize=True)
+        img_bytes = buf.getvalue()
+
+        # 文本摘要（优化格式）
+        motd = self._clean_motd_text(info.get("motd", "") or "")
+        
+        # 处理过长的 MOTD，限制显示长度
+        if len(motd) > 100:
+            motd = motd[:97] + "..."
+        
+        # 根据版本类型选择标题
+        if info['edition'] == 'Java':
+            title = "MC Java服务器状态查询"
+        else:
+            title = "MC 基岩版服务器状态查询"
+        
+        # 处理玩家示例列表
+        player_info = f"{info['players_online']}/{info['players_max']}"
+        if info.get('player_names'):
+            sample_players = ", ".join(info['player_names'][:3])  # 只显示前3个玩家
+            if len(info['player_names']) > 3:
+                sample_players += f" 等{len(info['player_names'])}人"
+            player_info += f" ({sample_players})"
+        
+        status_text = (
+            f"{title}\n"
+            f"✅️状态: 在线\n"
+            f"📋描述: {motd}\n"
+            f"💳协议版本: {info.get('protocol', '-') or '-'}\n"
+            f"🧰游戏版本: {info.get('version_name', '-') or '-'}\n"
+            f"📡延迟: {info['latency_ms']} ms\n"
+            f"👧玩家在线: {player_info}"
+        )
+
+        return img_bytes, status_text
+
+    def _load_server_icon(self, image: Image.Image, info: dict, x: int, y: int) -> bool:
+        """加载服务器图标，返回是否成功"""
+        # 尝试加载服务器 favicon
         if info.get("favicon_data_uri"):
             try:
-                prefix = "data:image/png;base64,"
                 data_uri: str = info["favicon_data_uri"]
                 if data_uri.startswith("data:"):
                     b64 = data_uri.split(",", 1)[1]
@@ -261,35 +490,33 @@ class MinecraftMOTDPlugin(Star):
                 icon = Image.open(BytesIO(base64.b64decode(b64))).convert("RGBA")
                 icon = icon.resize((96, 96))
                 image.paste(icon, (x, y), icon)
-                x_text = x + 96 + 16
-                icon_loaded = True
+                return True
             except Exception as e:
                 logger.info(f"加载服务器 favicon 失败: {e}")
-                icon_loaded = False
         
         # 如果没有 favicon，尝试加载默认 Minecraft logo
-        if not icon_loaded:
-            try:
-                # 尝试从网络加载默认 logo
-                import requests
-                from io import BytesIO
-                
-                default_logo_url = "https://patchwiki.biligame.com/images/mc/5/53/smk9nesqj6bkd5qyd718xxhocic6et0.png"
-                response = requests.get(default_logo_url, timeout=10)
-                if response.status_code == 200:
-                    default_icon = Image.open(BytesIO(response.content)).convert("RGBA")
-                    default_icon = default_icon.resize((96, 96))
-                    image.paste(default_icon, (x, y), default_icon)
-                    x_text = x + 96 + 16
-                    icon_loaded = True
-                    logger.info("使用默认 Minecraft logo")
-            except Exception as e:
-                logger.info(f"加载默认 logo 失败: {e}")
+        try:
+            # 尝试从网络加载默认 logo
+            import requests
+            
+            default_logo_url = "https://patchwiki.biligame.com/images/mc/5/53/smk9nesqj6bkd5qyd718xxhocic6et0.png"
+            response = requests.get(default_logo_url, timeout=10)
+            if response.status_code == 200:
+                default_icon = Image.open(BytesIO(response.content)).convert("RGBA")
+                default_icon = default_icon.resize((96, 96))
+                image.paste(default_icon, (x, y), default_icon)
+                logger.info("使用默认 Minecraft logo")
+                return True
+        except Exception as e:
+            logger.info(f"加载默认 logo 失败: {e}")
         
-        # 如果都没有加载成功，不显示图标
-        if not icon_loaded:
-            x_text = x
+        return False
 
+    def _render_content(self, draw: ImageDraw.ImageDraw, info: dict, x_text: int, y: int,
+                      font_title: ImageFont.ImageFont, font_body: ImageFont.ImageFont, 
+                      font_small: ImageFont.ImageFont, fg_primary: tuple, fg_secondary: tuple, 
+                      accent: tuple, width: int, padding: int):
+        """渲染内容区域"""
         # 标题行：host:port 与 Edition 徽标
         title = f"{info['host']}:{info['port']}"
         draw.text((x_text, y), title, font=font_title, fill=fg_primary)
@@ -325,22 +552,19 @@ class MinecraftMOTDPlugin(Star):
             draw.text((x_text, y_motd), line, font=font_body, fill=fg_primary)
             y_motd += 26
 
-        # 导出字节
-        buf = BytesIO()
-        image.save(buf, format="PNG", optimize=True)
-        img_bytes = buf.getvalue()
-
-        # 文本摘要
-        status_text = (
-            f"{info['edition']} | {info['host']}:{info['port']}\n"
-            f"在线: {info['players_online']}/{info['players_max']}  延迟: {info['latency_ms']}ms\n"
-            f"版本: {info.get('version_name', '-') or '-'}  协议: {info.get('protocol', '-') or '-'}\n"
-            f"MOTD: {motd}"
-        )
-
-        return img_bytes, status_text
-
     def _wrap_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+        """
+        按指定宽度折行文本
+        
+        Args:
+            draw: PIL 绘图对象
+            text: 要折行的文本
+            font: 字体对象
+            max_width: 最大宽度
+            
+        Returns:
+            折行后的文本列表
+        """
         if not text:
             return []
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -364,9 +588,30 @@ class MinecraftMOTDPlugin(Star):
                 result_lines.append(current_line)
         return result_lines
 
-    def _clean_motd_text(self, text: str) -> str:
+    def _clean_motd_text(self, text) -> str:
+        """
+        清理 MOTD 文本，去除 Minecraft 颜色码
+        
+        Args:
+            text: 原始 MOTD 文本（可能是字符串或 Motd 对象）
+            
+        Returns:
+            清理后的文本
+        """
         if not text:
             return ""
+        
+        # 处理 mcstatus 返回的 Motd 对象
+        if hasattr(text, 'clean'):
+            # 如果是 Motd 对象，使用 clean 属性
+            text = getattr(text, 'clean', str(text))
+        elif hasattr(text, 'raw'):
+            # 如果有 raw 属性，使用 raw 数据
+            text = getattr(text, 'raw', str(text))
+        elif not isinstance(text, str):
+            # 其他情况直接转为字符串
+            text = str(text)
+        
         # 统一换行
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         # 去除 Minecraft 颜色码（例如 §a、§l、§x§R§R§G§G§B§B 等，按配对清理）
@@ -376,18 +621,22 @@ class MinecraftMOTDPlugin(Star):
             return text
 
     def _save_temp_image(self, img_bytes: bytes) -> str:
-        tmp = tempfile.NamedTemporaryFile(prefix="motd_", suffix=".png", delete=False)
+        """保存临时图片文件"""
         try:
-            tmp.write(img_bytes)
-            tmp.flush()
-            return tmp.name
-        finally:
-            tmp.close()
+            with tempfile.NamedTemporaryFile(prefix="motd_", suffix=".png", delete=False) as tmp:
+                tmp.write(img_bytes)
+                tmp.flush()
+                return tmp.name
+        except Exception as e:
+            logger.error(f"保存临时图片失败: {e}")
+            raise
 
-    async def _cleanup_file(self, path: str, delay_sec: float = 180.0):
+    async def _cleanup_file(self, path: str, delay_sec: float = 60.0):
+        """异步清理临时文件"""
         try:
             await asyncio.sleep(delay_sec)
             if os.path.exists(path):
                 os.remove(path)
+                logger.info(f"临时文件已清理: {os.path.basename(path)}")
         except Exception as e:
-            logger.info(f"临时文件清理失败 {path}: {e}")
+            logger.warning(f"临时文件清理失败 {os.path.basename(path)}: {e}")
